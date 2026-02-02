@@ -42,7 +42,6 @@ main_message_id = None
 auto_update_enabled = True
 empty_since = None
 logs = []
-last_click = {}
 
 # ================== UTILS ==================
 
@@ -62,7 +61,10 @@ async def temp_send(chat_id, text, **kwargs):
         pass
 
 def bar(cur, max_, size=10):
-    return "█" * int(size * cur / max_) + "░" * (size - int(size * cur / max_)) if max_ else ""
+    if not max_:
+        return ""
+    filled = int(size * cur / max_)
+    return "█" * filled + "░" * (size - filled)
 
 def fmt_time(sec):
     return str(timedelta(seconds=max(0, int(sec))))
@@ -75,6 +77,51 @@ async def power(signal: str):
         async with s.post(url, headers=HEADERS, json={"signal": signal}) as r:
             log_event(f"{signal.upper()} → {r.status}")
             return r.status == 204
+
+# ================== STATUS RENDER ==================
+
+async def render_status():
+    global empty_since
+
+    try:
+        st = await asyncio.to_thread(mc_server.status)
+        online = True
+        po, pm = st.players.online, st.players.max
+        ping = int(st.latency)
+        motd = str(st.description).replace("\n", " ")
+    except:
+        online = False
+        po = pm = ping = 0
+        motd = "Offline"
+
+    timer_text = ""
+    if online and po == 0:
+        if empty_since is None:
+            empty_since = time.time()
+        left = AUTO_OFF_SECONDS - (time.time() - empty_since)
+        timer_text = f"⏳ Без игроков выключится через: `{fmt_time(left)}`"
+        if left <= 0:
+            await power("stop")
+            empty_since = None
+    else:
+        empty_since = None
+
+    text = (
+        f"🟢 **Main Vanilla 1.19**\n"
+        f"📡 {'ONLINE' if online else 'OFFLINE'} • 🏓 {ping} ms\n"
+        f"👥 {po}/{pm} {bar(po, pm)}\n"
+        f"📝 `{motd}`\n"
+        f"{timer_text}\n"
+        f"🌐 `{MC_HOST}`"
+    )
+
+    await bot.edit_message_text(
+        chat_id=main_chat_id,
+        message_id=main_message_id,
+        text=text,
+        reply_markup=keyboard(),
+        parse_mode="Markdown"
+    )
 
 # ================== UI ==================
 
@@ -101,97 +148,16 @@ def keyboard():
         ]
     ])
 
-# ================== STATUS LOOP ==================
-async def force_update_status():
-    global empty_since
-
-    try:
-        st = await asyncio.to_thread(mc_server.status)
-        online = True
-        po, pm = st.players.online, st.players.max
-        ping = int(st.latency)
-        motd = str(st.description).replace("\n", " ")
-    except:
-        online = False
-        po = pm = ping = 0
-        motd = "Offline"
-
-    timer_text = ""
-    if online and po == 0:
-        if empty_since is None:
-            empty_since = time.time()
-        left = AUTO_OFF_SECONDS - (time.time() - empty_since)
-        timer_text = f"⏳ Без игроков выключится через: `{fmt_time(left)}`"
-    else:
-        empty_since = None
-
-    text = (
-        f"🟢 **Main Vanilla 1.19**\n"
-        f"📡 {'ONLINE' if online else 'OFFLINE'} • 🏓 {ping} ms\n"
-        f"👥 {po}/{pm} {bar(po, pm)}\n"
-        f"📝 `{motd}`\n"
-        f"{timer_text}\n"
-        f"🌐 `{MC_HOST}`"
-    )
-
-    await bot.edit_message_text(
-        chat_id=main_chat_id,
-        message_id=main_message_id,
-        text=text,
-        reply_markup=keyboard(),
-        parse_mode="Markdown"
-    )
+# ================== LOOP ==================
 
 async def status_loop():
-    global empty_since
-
     while True:
         await asyncio.sleep(STATUS_INTERVAL)
-        if not auto_update_enabled or not main_chat_id:
-            continue
-
-        try:
-            st = await asyncio.to_thread(mc_server.status)
-            online = True
-            po, pm = st.players.online, st.players.max
-            ping = int(st.latency)
-            motd = str(st.description).replace("\n", " ")
-        except:
-            online = False
-            po = pm = ping = 0
-            motd = "Offline"
-
-        timer_text = ""
-        if online and po == 0:
-            if empty_since is None:
-                empty_since = time.time()
-            left = AUTO_OFF_SECONDS - (time.time() - empty_since)
-            timer_text = f"⏳ Без игроков выключится через: `{fmt_time(left)}`"
-            if left <= 0:
-                await power("stop")
-                empty_since = None
-        else:
-            empty_since = None
-
-        text = (
-            f"🟢 **Main Vanilla 1.19**\n"
-            f"📡 {'ONLINE' if online else 'OFFLINE'} • 🏓 {ping} ms\n"
-            f"👥 {po}/{pm} {bar(po, pm)}\n"
-            f"📝 `{motd}`\n"
-            f"{timer_text}\n"
-            f"🌐 `{MC_HOST}`"
-        )
-
-        try:
-            await bot.edit_message_text(
-                chat_id=main_chat_id,
-                message_id=main_message_id,
-                text=text,
-                reply_markup=keyboard(),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            print("STATUS LOOP ERROR:", e)
+        if auto_update_enabled and main_chat_id:
+            try:
+                await render_status()
+            except Exception as e:
+                print("STATUS LOOP ERROR:", e)
 
 # ================== HANDLERS ==================
 
@@ -203,20 +169,16 @@ async def start_cmd(msg: types.Message):
         return
 
     main_chat_id = msg.chat.id
-
-    sent = await msg.answer(
-        "🟡 **Загрузка статуса сервера...**",
-        parse_mode="Markdown"
-    )
+    sent = await msg.answer("🟡 Загрузка статуса...")
     main_message_id = sent.message_id
 
-    # ⬇️ СРАЗУ делаем первый апдейт
     await asyncio.sleep(1)
-    await force_update_status()
-
+    await render_status()
 
 @dp.callback_query()
 async def cb(call: types.CallbackQuery):
+    global auto_update_enabled
+
     if not allowed(call.from_user.id):
         return
 
@@ -225,6 +187,12 @@ async def cb(call: types.CallbackQuery):
     if call.data in ("start", "stop", "restart"):
         ok = await power(call.data)
         await temp_send(call.message.chat.id, f"{'✅' if ok else '❌'} {call.data.upper()}")
+        await asyncio.sleep(2)
+        await render_status()
+
+    elif call.data == "refresh":
+        log_event("MANUAL REFRESH")
+        await render_status()
 
     elif call.data == "players":
         try:
@@ -236,15 +204,18 @@ async def cb(call: types.CallbackQuery):
         await temp_send(call.message.chat.id, text)
 
     elif call.data == "log":
-        await temp_send(call.message.chat.id, "📜 Лог:\n" + "\n".join(logs[-10:] or ["Пусто"]))
+        await temp_send(
+            call.message.chat.id,
+            "📜 Лог:\n" + "\n".join(logs[-10:] or ["Пусто"])
+        )
 
     elif call.data == "ip":
         await temp_send(call.message.chat.id, f"`{MC_HOST}`", parse_mode="Markdown")
 
     elif call.data == "auto":
-        global auto_update_enabled
         auto_update_enabled = not auto_update_enabled
         log_event(f"AUTO → {'ON' if auto_update_enabled else 'OFF'}")
+        await render_status()
 
 # ================== MAIN ==================
 
