@@ -2,25 +2,24 @@ import asyncio
 import os
 import time
 import aiohttp
+from datetime import timedelta
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
-
 from mcstatus import JavaServer
 
 # ================== ENV ==================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_IDS_RAW = os.getenv("OWNER_IDS")
+OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x}
 PLAY_API_KEY = os.getenv("PLAY_API_KEY")
 SERVER_ID = os.getenv("SERVER_ID")
 MC_HOST = os.getenv("MC_HOST", "mirvosit.play.hosting")
 
-if not all([BOT_TOKEN, OWNER_IDS_RAW, PLAY_API_KEY, SERVER_ID]):
-    raise RuntimeError("Missing required environment variables")
-
-ALLOWED_USERS = {int(x.strip()) for x in OWNER_IDS_RAW.split(",") if x.strip()}
+STATUS_INTERVAL = 10
+AUTO_DELETE_SECONDS = 30
+AUTO_OFF_SECONDS = 15 * 60
 
 API_BASE = "https://panel.play.hosting/api/client"
 
@@ -30,140 +29,178 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-mc_server = JavaServer.lookup(MC_HOST)
-
-# ================== BOT ==================
+# ================== STATE ==================
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
+mc_server = JavaServer.lookup(MC_HOST)
+
+main_chat_id = None
+main_message_id = None
+
+auto_update_enabled = True
+empty_since = None
+logs = []
 last_click = {}
+
+# ================== UTILS ==================
+
+def allowed(uid: int) -> bool:
+    return uid in OWNER_IDS
+
+def log_event(text: str):
+    logs.append(f"[{time.strftime('%H:%M:%S')}] {text}")
+    del logs[:-20]
+
+async def temp_send(chat_id, text, **kwargs):
+    msg = await bot.send_message(chat_id, text, **kwargs)
+    await asyncio.sleep(AUTO_DELETE_SECONDS)
+    try:
+        await msg.delete()
+    except:
+        pass
+
+def bar(cur, max_, size=10):
+    return "█" * int(size * cur / max_) + "░" * (size - int(size * cur / max_)) if max_ else ""
+
+def fmt_time(sec):
+    return str(timedelta(seconds=max(0, int(sec))))
+
+# ================== PLAY HOSTING ==================
+
+async def power(signal: str):
+    url = f"{API_BASE}/servers/{SERVER_ID}/power"
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, headers=HEADERS, json={"signal": signal}) as r:
+            log_event(f"{signal.upper()} → {r.status}")
+            return r.status == 204
 
 # ================== UI ==================
 
 def keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="▶️ Start", callback_data="start"),
-            InlineKeyboardButton(text="⏹ Stop", callback_data="stop"),
-            InlineKeyboardButton(text="🔄 Restart", callback_data="restart"),
+            InlineKeyboardButton("▶️ Start", callback_data="start"),
+            InlineKeyboardButton("⏹ Stop", callback_data="stop"),
+            InlineKeyboardButton("🔄 Restart", callback_data="restart"),
         ],
         [
-            InlineKeyboardButton(text="📊 Status", callback_data="status"),
-            InlineKeyboardButton(text="👥 Players", callback_data="players"),
+            InlineKeyboardButton("🔄 Обновить", callback_data="refresh"),
+            InlineKeyboardButton("👥 Игроки", callback_data="players"),
         ],
+        [
+            InlineKeyboardButton("📜 Лог", callback_data="log"),
+            InlineKeyboardButton("📌 IP", callback_data="ip"),
+        ],
+        [
+            InlineKeyboardButton(
+                f"⚙ Автообновление: {'✅' if auto_update_enabled else '❌'}",
+                callback_data="auto"
+            )
+        ]
     ])
 
-def allowed(uid: int) -> bool:
-    return uid in ALLOWED_USERS
+# ================== STATUS LOOP ==================
 
-# ================== PLAY HOSTING API ==================
+async def status_loop():
+    global empty_since
 
-async def send_power(signal: str) -> bool:
-    url = f"{API_BASE}/servers/{SERVER_ID}/power"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url,
-            headers=HEADERS,
-            json={"signal": signal},
-            timeout=10
-        ) as resp:
-            text = await resp.text()
-            print(f"[POWER] {signal} -> {resp.status} | {text}")
-            return resp.status == 204
+    while True:
+        await asyncio.sleep(STATUS_INTERVAL)
+        if not auto_update_enabled or not main_chat_id:
+            continue
 
-# ================== MC STATUS ==================
+        try:
+            st = await asyncio.to_thread(mc_server.status)
+            online = True
+            po, pm = st.players.online, st.players.max
+            ping = int(st.latency)
+            motd = str(st.description).replace("\n", " ")
+        except:
+            online = False
+            po = pm = ping = 0
+            motd = "Offline"
 
-async def mc_status():
-    return await asyncio.to_thread(mc_server.status)
+        timer_text = ""
+        if online and po == 0:
+            if empty_since is None:
+                empty_since = time.time()
+            left = AUTO_OFF_SECONDS - (time.time() - empty_since)
+            timer_text = f"⏳ Без игроков выключится через: `{fmt_time(left)}`"
+            if left <= 0:
+                await power("stop")
+                empty_since = None
+        else:
+            empty_since = None
 
-async def mc_query():
-    return await asyncio.to_thread(mc_server.query)
+        text = (
+            f"🟢 **Main Vanilla 1.19**\n"
+            f"📡 {'ONLINE' if online else 'OFFLINE'} • 🏓 {ping} ms\n"
+            f"👥 {po}/{pm} {bar(po, pm)}\n"
+            f"📝 `{motd}`\n"
+            f"{timer_text}\n"
+            f"🌐 `{MC_HOST}`"
+        )
+
+        try:
+            await bot.edit_message_text(
+                chat_id=main_chat_id,
+                message_id=main_message_id,
+                text=text,
+                reply_markup=keyboard(),
+                parse_mode="Markdown"
+            )
+        except:
+            pass
 
 # ================== HANDLERS ==================
 
 @dp.message(CommandStart())
-async def start_cmd(message: types.Message):
-    if not allowed(message.from_user.id):
+async def start_cmd(msg: types.Message):
+    global main_chat_id, main_message_id
+    if not allowed(msg.from_user.id):
         return
-
-    await message.answer(
-        "🎮 *Minecraft Server Control*\n"
-        f"🔗 `{MC_HOST}`",
-        reply_markup=keyboard(),
-        parse_mode="Markdown"
-    )
+    sent = await msg.answer("⏳ Загружаю статус...")
+    main_chat_id = msg.chat.id
+    main_message_id = sent.message_id
 
 @dp.callback_query()
-async def on_callback(call: types.CallbackQuery):
-    try:
-        await call.answer("⏳")
-    except:
-        return
-
+async def cb(call: types.CallbackQuery):
     if not allowed(call.from_user.id):
         return
 
-    uid = call.from_user.id
-    now = time.time()
-    if uid in last_click and now - last_click[uid] < 2:
-        return
-    last_click[uid] = now
+    await call.answer()
 
-    if call.data == "start":
-        ok = await send_power("start")
-        await call.message.answer("🟢 Сервер запускается" if ok else "❌ Ошибка запуска")
-
-    elif call.data == "stop":
-        ok = await send_power("stop")
-        await call.message.answer("🔴 Сервер останавливается" if ok else "❌ Ошибка остановки")
-
-    elif call.data == "restart":
-        ok = await send_power("restart")
-        await call.message.answer("🔄 Сервер перезапускается" if ok else "❌ Ошибка перезапуска")
-
-    elif call.data == "status":
-        try:
-            status = await mc_status()
-            po = status.players.online
-            pm = status.players.max
-            ping = int(status.latency)
-            motd = str(status.description).replace("\n", " ")
-
-            text = (
-                f"🟢 *Minecraft сервер*\n"
-                f"📡 ONLINE\n"
-                f"👥 {po}/{pm}\n"
-                f"🏓 {ping} ms\n"
-                f"📝 `{motd}`\n"
-                f"🔗 `{MC_HOST}`"
-            )
-        except Exception:
-            text = (
-                f"🔴 *Minecraft сервер*\n"
-                f"📡 OFFLINE\n"
-                f"🔗 `{MC_HOST}`"
-            )
-
-        await call.message.answer(text, parse_mode="Markdown")
+    if call.data in ("start", "stop", "restart"):
+        ok = await power(call.data)
+        await temp_send(call.message.chat.id, f"{'✅' if ok else '❌'} {call.data.upper()}")
 
     elif call.data == "players":
         try:
-            query = await mc_query()
-            names = query.players.names
-            if not names:
-                text = "😴 *Сейчас на сервере никого нет*"
-            else:
-                text = "👥 *Игроки онлайн:*\n" + "\n".join(f"• `{n}`" for n in names)
-        except Exception:
-            text = "⚠️ *Список игроков недоступен*"
+            q = await asyncio.to_thread(mc_server.query)
+            names = q.players.names
+            text = "👥 Игроки:\n" + "\n".join(names) if names else "😴 Никого нет"
+        except:
+            text = "⚠️ QUERY недоступен"
+        await temp_send(call.message.chat.id, text)
 
-        await call.message.answer(text, parse_mode="Markdown")
+    elif call.data == "log":
+        await temp_send(call.message.chat.id, "📜 Лог:\n" + "\n".join(logs[-10:] or ["Пусто"]))
+
+    elif call.data == "ip":
+        await temp_send(call.message.chat.id, f"`{MC_HOST}`", parse_mode="Markdown")
+
+    elif call.data == "auto":
+        global auto_update_enabled
+        auto_update_enabled = not auto_update_enabled
+        log_event(f"AUTO → {'ON' if auto_update_enabled else 'OFF'}")
 
 # ================== MAIN ==================
 
 async def main():
-    print("🤖 Minecraft Play Hosting bot started")
+    asyncio.create_task(status_loop())
+    print("🤖 FINAL Minecraft Control Bot started")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
