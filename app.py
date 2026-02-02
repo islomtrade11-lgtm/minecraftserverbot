@@ -13,14 +13,8 @@ OWNER_IDS_RAW = os.getenv("OWNER_IDS")
 PLAY_API_KEY = os.getenv("PLAY_API_KEY")
 SERVER_ID = os.getenv("SERVER_ID")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
-if not OWNER_IDS_RAW:
-    raise RuntimeError("OWNER_IDS is not set")
-if not PLAY_API_KEY:
-    raise RuntimeError("PLAY_API_KEY is not set")
-if not SERVER_ID:
-    raise RuntimeError("SERVER_ID is not set")
+if not all([BOT_TOKEN, OWNER_IDS_RAW, PLAY_API_KEY, SERVER_ID]):
+    raise RuntimeError("Missing required environment variables")
 
 ALLOWED_USERS = {int(x.strip()) for x in OWNER_IDS_RAW.split(",") if x.strip()}
 
@@ -53,29 +47,42 @@ def keyboard():
         ]
     ])
 
-def allowed(user_id: int) -> bool:
-    return user_id in ALLOWED_USERS
+def allowed(uid: int) -> bool:
+    return uid in ALLOWED_USERS
 
 # ================== API ==================
 
 async def send_power(signal: str) -> bool:
     url = f"{API_BASE}/servers/{SERVER_ID}/power"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url,
-            headers=HEADERS,
-            json={"signal": signal},
-            timeout=10
-        ) as resp:
-            return resp.status == 204
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                headers=HEADERS,
+                json={"signal": signal},
+                timeout=10
+            ) as resp:
+                return resp.status == 204
+    except Exception:
+        return False
 
 async def get_status() -> str:
     url = f"{API_BASE}/servers/{SERVER_ID}/resources"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=HEADERS, timeout=10) as resp:
-            data = await resp.json()
-            state = data["attributes"]["current_state"]
-            return state.upper()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=HEADERS, timeout=10) as resp:
+                if resp.status != 200:
+                    return f"ERROR ({resp.status})"
+
+                data = await resp.json()
+
+                attributes = data.get("attributes")
+                if not attributes:
+                    return "UNKNOWN"
+
+                return attributes.get("current_state", "UNKNOWN").upper()
+    except Exception:
+        return "API ERROR"
 
 # ================== HANDLERS ==================
 
