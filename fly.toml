@@ -1,0 +1,9 @@
+app = "play-hosting-tg-bot"
+
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
