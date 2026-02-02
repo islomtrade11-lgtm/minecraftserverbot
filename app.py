@@ -81,21 +81,21 @@ async def power(signal: str):
 def keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton("▶️ Start", callback_data="start"),
-            InlineKeyboardButton("⏹ Stop", callback_data="stop"),
-            InlineKeyboardButton("🔄 Restart", callback_data="restart"),
+            InlineKeyboardButton(text="▶️ Start", callback_data="start"),
+            InlineKeyboardButton(text="⏹ Stop", callback_data="stop"),
+            InlineKeyboardButton(text="🔄 Restart", callback_data="restart"),
         ],
         [
-            InlineKeyboardButton("🔄 Обновить", callback_data="refresh"),
-            InlineKeyboardButton("👥 Игроки", callback_data="players"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh"),
+            InlineKeyboardButton(text="👥 Игроки", callback_data="players"),
         ],
         [
-            InlineKeyboardButton("📜 Лог", callback_data="log"),
-            InlineKeyboardButton("📌 IP", callback_data="ip"),
+            InlineKeyboardButton(text="📜 Лог", callback_data="log"),
+            InlineKeyboardButton(text="📌 IP", callback_data="ip"),
         ],
         [
             InlineKeyboardButton(
-                f"⚙ Автообновление: {'✅' if auto_update_enabled else '❌'}",
+                text=f"⚙ Автообновление: {'✅' if auto_update_enabled else '❌'}",
                 callback_data="auto"
             )
         ]
