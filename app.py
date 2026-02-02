@@ -2,9 +2,12 @@ import asyncio
 import os
 import time
 import aiohttp
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
+
+from mcstatus import JavaServer
 
 # ================== ENV ==================
 
@@ -12,6 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_IDS_RAW = os.getenv("OWNER_IDS")
 PLAY_API_KEY = os.getenv("PLAY_API_KEY")
 SERVER_ID = os.getenv("SERVER_ID")
+MC_HOST = os.getenv("MC_HOST", "mirvosit.play.hosting")
 
 if not all([BOT_TOKEN, OWNER_IDS_RAW, PLAY_API_KEY, SERVER_ID]):
     raise RuntimeError("Missing required environment variables")
@@ -25,6 +29,8 @@ HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
 }
+
+mc_server = JavaServer.lookup(MC_HOST)
 
 # ================== BOT ==================
 
@@ -43,46 +49,36 @@ def keyboard():
             InlineKeyboardButton(text="🔄 Restart", callback_data="restart"),
         ],
         [
-            InlineKeyboardButton(text="📊 Status", callback_data="status")
-        ]
+            InlineKeyboardButton(text="📊 Status", callback_data="status"),
+            InlineKeyboardButton(text="👥 Players", callback_data="players"),
+        ],
     ])
 
 def allowed(uid: int) -> bool:
     return uid in ALLOWED_USERS
 
-# ================== API ==================
+# ================== PLAY HOSTING API ==================
 
 async def send_power(signal: str) -> bool:
     url = f"{API_BASE}/servers/{SERVER_ID}/power"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                headers=HEADERS,
-                json={"signal": signal},
-                timeout=10
-            ) as resp:
-                return resp.status == 204
-    except Exception:
-        return False
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url,
+            headers=HEADERS,
+            json={"signal": signal},
+            timeout=10
+        ) as resp:
+            text = await resp.text()
+            print(f"[POWER] {signal} -> {resp.status} | {text}")
+            return resp.status == 204
 
-async def get_status() -> str:
-    url = f"{API_BASE}/servers/{SERVER_ID}/resources"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=HEADERS, timeout=10) as resp:
-                if resp.status != 200:
-                    return f"ERROR ({resp.status})"
+# ================== MC STATUS ==================
 
-                data = await resp.json()
+async def mc_status():
+    return await asyncio.to_thread(mc_server.status)
 
-                attributes = data.get("attributes")
-                if not attributes:
-                    return "UNKNOWN"
-
-                return attributes.get("current_state", "UNKNOWN").upper()
-    except Exception:
-        return "API ERROR"
+async def mc_query():
+    return await asyncio.to_thread(mc_server.query)
 
 # ================== HANDLERS ==================
 
@@ -90,8 +86,10 @@ async def get_status() -> str:
 async def start_cmd(message: types.Message):
     if not allowed(message.from_user.id):
         return
+
     await message.answer(
-        "🎮 *Play Hosting Server Control*",
+        "🎮 *Minecraft Server Control*\n"
+        f"🔗 `{MC_HOST}`",
         reply_markup=keyboard(),
         parse_mode="Markdown"
     )
@@ -125,13 +123,47 @@ async def on_callback(call: types.CallbackQuery):
         await call.message.answer("🔄 Сервер перезапускается" if ok else "❌ Ошибка перезапуска")
 
     elif call.data == "status":
-        status = await get_status()
-        await call.message.answer(f"📊 Статус сервера: *{status}*", parse_mode="Markdown")
+        try:
+            status = await mc_status()
+            po = status.players.online
+            pm = status.players.max
+            ping = int(status.latency)
+            motd = str(status.description).replace("\n", " ")
+
+            text = (
+                f"🟢 *Minecraft сервер*\n"
+                f"📡 ONLINE\n"
+                f"👥 {po}/{pm}\n"
+                f"🏓 {ping} ms\n"
+                f"📝 `{motd}`\n"
+                f"🔗 `{MC_HOST}`"
+            )
+        except Exception:
+            text = (
+                f"🔴 *Minecraft сервер*\n"
+                f"📡 OFFLINE\n"
+                f"🔗 `{MC_HOST}`"
+            )
+
+        await call.message.answer(text, parse_mode="Markdown")
+
+    elif call.data == "players":
+        try:
+            query = await mc_query()
+            names = query.players.names
+            if not names:
+                text = "😴 *Сейчас на сервере никого нет*"
+            else:
+                text = "👥 *Игроки онлайн:*\n" + "\n".join(f"• `{n}`" for n in names)
+        except Exception:
+            text = "⚠️ *Список игроков недоступен*"
+
+        await call.message.answer(text, parse_mode="Markdown")
 
 # ================== MAIN ==================
 
 async def main():
-    print("🤖 Play Hosting control bot started")
+    print("🤖 Minecraft Play Hosting bot started")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
