@@ -102,6 +102,45 @@ def keyboard():
     ])
 
 # ================== STATUS LOOP ==================
+async def force_update_status():
+    global empty_since
+
+    try:
+        st = await asyncio.to_thread(mc_server.status)
+        online = True
+        po, pm = st.players.online, st.players.max
+        ping = int(st.latency)
+        motd = str(st.description).replace("\n", " ")
+    except:
+        online = False
+        po = pm = ping = 0
+        motd = "Offline"
+
+    timer_text = ""
+    if online and po == 0:
+        if empty_since is None:
+            empty_since = time.time()
+        left = AUTO_OFF_SECONDS - (time.time() - empty_since)
+        timer_text = f"⏳ Без игроков выключится через: `{fmt_time(left)}`"
+    else:
+        empty_since = None
+
+    text = (
+        f"🟢 **Main Vanilla 1.19**\n"
+        f"📡 {'ONLINE' if online else 'OFFLINE'} • 🏓 {ping} ms\n"
+        f"👥 {po}/{pm} {bar(po, pm)}\n"
+        f"📝 `{motd}`\n"
+        f"{timer_text}\n"
+        f"🌐 `{MC_HOST}`"
+    )
+
+    await bot.edit_message_text(
+        chat_id=main_chat_id,
+        message_id=main_message_id,
+        text=text,
+        reply_markup=keyboard(),
+        parse_mode="Markdown"
+    )
 
 async def status_loop():
     global empty_since
@@ -151,19 +190,30 @@ async def status_loop():
                 reply_markup=keyboard(),
                 parse_mode="Markdown"
             )
-        except:
-            pass
+        except Exception as e:
+            print("STATUS LOOP ERROR:", e)
 
 # ================== HANDLERS ==================
 
 @dp.message(CommandStart())
 async def start_cmd(msg: types.Message):
     global main_chat_id, main_message_id
+
     if not allowed(msg.from_user.id):
         return
-    sent = await msg.answer("⏳ Загружаю статус...")
+
     main_chat_id = msg.chat.id
+
+    sent = await msg.answer(
+        "🟡 **Загрузка статуса сервера...**",
+        parse_mode="Markdown"
+    )
     main_message_id = sent.message_id
+
+    # ⬇️ СРАЗУ делаем первый апдейт
+    await asyncio.sleep(1)
+    await force_update_status()
+
 
 @dp.callback_query()
 async def cb(call: types.CallbackQuery):
